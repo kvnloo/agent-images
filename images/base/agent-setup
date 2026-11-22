@@ -8,6 +8,15 @@
 set -euo pipefail
 H="${HERMES_HOME:-/opt/data}"
 P="${AGENT_PROFILE:-boat}"
+# The image's `hermes` shim drops root to the hermes user (uid 10000), so anything this script
+# writes as root (plugins, config.yaml, SOUL.md, .gitconfig) would be unwritable or invisible to
+# the agent. Do the same drop here; HOME=/opt/data matches the shim, so git identity lands where
+# the agent's git reads it.
+if [ "$(id -u)" = 0 ] && [ -x /command/s6-setuidgid ] && id hermes >/dev/null 2>&1; then
+  mkdir -p "$H" && chown hermes:hermes "$H"
+  [ -d "$H/plugins" ] && chown -R hermes:hermes "$H/plugins"
+  exec /command/s6-setuidgid hermes env HOME=/opt/data "$0" "$@"
+fi
 mkdir -p "$H/plugins"
 [ -e "$H/plugins/claude-subscription-directsdk-experimental" ] || cp -r "${AGENT_PLUGINS_DIR:-/opt/plugins}/claude-subscription-directsdk-experimental" "$H/plugins/"
 if [ ! -f "$H/.agent-setup-done" ]; then

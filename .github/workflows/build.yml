@@ -24,6 +24,8 @@ jobs:
             set -e; agent-setup
             test "$(cat /tmp/h/.agent-setup-done)" = boat
             head -1 /tmp/h/SOUL.md | grep -qx "# Boat Hermes"
+            test "$(stat -c %U /tmp/h/config.yaml)" = hermes
+            test "$(HOME=/opt/data git config --global user.name)" = "Kevin Rajan"
             for kv in approvals.mode=off approvals.single_query_mode=approve approvals.cron_mode=approve approvals.unattended_mode=approve; do
               got=$(hermes config get ${kv%%=*} | tail -1); echo "${kv%%=*}=$got"; test "$got" = "${kv#*=}"
             done'
