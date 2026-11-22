@@ -1,15 +1,28 @@
 #!/bin/bash
 # Idempotent first-run setup inside the container (HERMES_HOME=/opt/data, user hermes).
 # Auth: Claude Code reads CLAUDE_CODE_OAUTH_TOKEN from the environment (Boat injects it).
+# AGENT_PROFILE: boat (default) installs the unattended "yolo" profile from /opt/profiles/boat
+#   (SOUL.md + config.yaml) on first run; none keeps the plain upstream Hermes defaults.
+#   Nothing here runs unless an agent is started (`lane` calls it), so non-agent use of the
+#   image is unaffected.
 set -euo pipefail
 H="${HERMES_HOME:-/opt/data}"
+P="${AGENT_PROFILE:-boat}"
 mkdir -p "$H/plugins"
-[ -e "$H/plugins/claude-subscription-directsdk-experimental" ] || cp -r /opt/plugins/claude-subscription-directsdk-experimental "$H/plugins/"
+[ -e "$H/plugins/claude-subscription-directsdk-experimental" ] || cp -r "${AGENT_PLUGINS_DIR:-/opt/plugins}/claude-subscription-directsdk-experimental" "$H/plugins/"
 if [ ! -f "$H/.agent-setup-done" ]; then
+  if [ "$P" != none ]; then
+    src="${AGENT_PROFILES_DIR:-/opt/profiles}/$P"
+    [ -f "$src/config.yaml" ] || { echo "agent-setup: unknown AGENT_PROFILE=$P (no $src/config.yaml)" >&2; exit 2; }
+    # The profile replaces whatever stock config exists; a config you mounted yourself wins only
+    # with AGENT_PROFILE=none.
+    cp "$src/config.yaml" "$H/config.yaml"
+    cp "$src/SOUL.md" "$H/SOUL.md"
+  fi
   hermes config set model.provider claude-subscription-directsdk-experimental >/dev/null
   hermes config set model.default "${HERMES_MODEL:-claude-opus-5-5}" >/dev/null
   hermes config set agent.max_turns "${HERMES_MAX_TURNS:-400}" >/dev/null
-  touch "$H/.agent-setup-done"
+  echo "$P" > "$H/.agent-setup-done"
 fi
 git config --global user.name "${GIT_AUTHOR_NAME:-Kevin Rajan}"
 git config --global user.email "${GIT_AUTHOR_EMAIL:-kvnloo@users.noreply.github.com}"
