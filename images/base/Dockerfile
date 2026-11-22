@@ -7,7 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       gh jq ripgrep unzip xz-utils zip curl ca-certificates build-essential tmux \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-RUN npm install -g @anthropic-ai/claude-code && claude --version
+# The image's npm keeps its global prefix under /opt/hermes/tools (not on PATH) and npm 12 blocks
+# install scripts unless allowed; Claude Code's postinstall fetches the native binary.
+RUN npm install -g --prefix /usr/local --allow-scripts=@anthropic-ai/claude-code @anthropic-ai/claude-code \
+    && claude --version
 # DirectSDK provider plugin, tracked from upstream main on every (weekly) rebuild.
 RUN git clone -q --depth 1 --filter=blob:none --sparse https://github.com/NousResearch/hermes-official-plugins /tmp/hop \
     && git -C /tmp/hop sparse-checkout set claude-subscription-directsdk \
