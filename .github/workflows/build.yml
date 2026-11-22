@@ -30,7 +30,10 @@ jobs:
               got=$(hermes config get ${kv%%=*} | tail -1); echo "${kv%%=*}=$got"; test "$got" = "${kv#*=}"
             done'
           docker run --rm --entrypoint bash -e HERMES_HOME=/tmp/h -e AGENT_PROFILE=none ghcr.io/kvnloo/agent-base:latest -c '
-            set -e; agent-setup; test ! -f /tmp/h/SOUL.md; echo "AGENT_PROFILE=none keeps upstream defaults"'
+            set -e; agent-setup; test "$(cat /tmp/h/.agent-setup-done)" = none
+            ! head -1 /tmp/h/SOUL.md 2>/dev/null | grep -qx "# Boat Hermes"
+            test "$(hermes config get approvals.mode | tail -1)" != off
+            echo "AGENT_PROFILE=none keeps upstream defaults"'
       - if: github.event_name != 'pull_request'
         run: docker push -a ghcr.io/kvnloo/agent-base
   repo:
