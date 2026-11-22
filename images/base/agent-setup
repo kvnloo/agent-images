@@ -1,0 +1,15 @@
+#!/bin/bash
+# Idempotent first-run setup inside the container (HERMES_HOME=/opt/data, user hermes).
+# Auth: Claude Code reads CLAUDE_CODE_OAUTH_TOKEN from the environment (Boat injects it).
+set -euo pipefail
+H="${HERMES_HOME:-/opt/data}"
+mkdir -p "$H/plugins"
+[ -e "$H/plugins/claude-subscription-directsdk-experimental" ] || cp -r /opt/plugins/claude-subscription-directsdk-experimental "$H/plugins/"
+if [ ! -f "$H/.agent-setup-done" ]; then
+  hermes config set model.provider claude-subscription-directsdk-experimental >/dev/null
+  hermes config set model.default "${HERMES_MODEL:-claude-opus-5-5}" >/dev/null
+  hermes config set agent.max_turns "${HERMES_MAX_TURNS:-400}" >/dev/null
+  touch "$H/.agent-setup-done"
+fi
+git config --global user.name "${GIT_AUTHOR_NAME:-Kevin Rajan}"
+git config --global user.email "${GIT_AUTHOR_EMAIL:-kvnloo@users.noreply.github.com}"

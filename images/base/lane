@@ -1,0 +1,11 @@
+#!/bin/bash
+# lane <prompt-file> [resume-session-id]
+# Runs one Hermes (DirectSDK) agent turn non-interactively and keeps the session id for resumes.
+set -euo pipefail
+agent-setup
+p="$1"; sid="${2:-}"
+cd "${LANE_WORKDIR:-/work}"
+if [ -n "$sid" ]; then
+  exec hermes chat --oneshot --yolo -Q --source lane --resume "$sid" --query-file "$p"
+fi
+exec hermes chat --oneshot --yolo -Q --source lane --pass-session-id --query-file "$p"
