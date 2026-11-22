@@ -31,7 +31,7 @@ jobs:
             done'
           docker run --rm --entrypoint bash -e HERMES_HOME=/tmp/h -e AGENT_PROFILE=none ghcr.io/kvnloo/agent-base:latest -c '
             set -e; agent-setup; test "$(cat /tmp/h/.agent-setup-done)" = none
-            ! head -1 /tmp/h/SOUL.md 2>/dev/null | grep -qx "# Boat Hermes"
+            if head -1 /tmp/h/SOUL.md 2>/dev/null | grep -qx "# Boat Hermes"; then echo "boat persona leaked"; exit 1; fi
             test "$(hermes config get approvals.mode | tail -1)" != off
             echo "AGENT_PROFILE=none keeps upstream defaults"'
       - if: github.event_name != 'pull_request'
