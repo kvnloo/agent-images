@@ -82,17 +82,20 @@ cp "$top/manifest.json" "$dest/manifest.json"
 bt="$data/boat-traces"
 mkdir -p "$bt/claude-home/projects" "$bt/codex-home/sessions" "$bt/hermes"
 new_files="$stage/new-files"; : > "$new_files"
+# No -t: files that changed get a fresh mtime, so incremental scanners (groot's ssh pull of this data
+# dir) see them as new; --checksum leaves unchanged files and their mtimes alone on re-pulls.
+sync_opts="-rl --checksum"
 if [ -d "$top/claude/projects" ]; then
   for p in "$top/claude/projects"/*/; do
     [ -d "$p" ] || continue
     t="$bt/claude-home/projects/boat-$id--$(basename "$p")"; mkdir -p "$t"
-    rsync -a "$p" "$t/"
+    rsync $sync_opts "$p" "$t/"
     (cd "$p" && find . -maxdepth 1 -name '*.jsonl') | sed "s#^\./#$t/#" >> "$new_files"
   done
 fi
 for c in sessions archived_sessions; do
   if [ -d "$top/codex/$c" ]; then
-    mkdir -p "$bt/codex-home/$c"; rsync -a "$top/codex/$c/" "$bt/codex-home/$c/"
+    mkdir -p "$bt/codex-home/$c"; rsync $sync_opts "$top/codex/$c/" "$bt/codex-home/$c/"
     (cd "$top/codex/$c" && find . -name '*.jsonl') | sed "s#^\./#$bt/codex-home/$c/#" >> "$new_files"
   fi
 done
