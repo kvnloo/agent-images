@@ -16,6 +16,6 @@ RUN git clone -q --depth 1 --filter=blob:none --sparse https://github.com/NousRe
     && git -C /tmp/hop sparse-checkout set claude-subscription-directsdk \
     && mkdir -p /opt/plugins && mv /tmp/hop/claude-subscription-directsdk /opt/plugins/claude-subscription-directsdk-experimental \
     && rm -rf /tmp/hop
-COPY agent-setup lane /usr/local/bin/
-RUN chmod +x /usr/local/bin/agent-setup /usr/local/bin/lane
+COPY agent-setup lane trace-export /usr/local/bin/
+RUN chmod +x /usr/local/bin/agent-setup /usr/local/bin/lane /usr/local/bin/trace-export
 LABEL org.opencontainers.image.source=https://github.com/kvnloo/agent-images

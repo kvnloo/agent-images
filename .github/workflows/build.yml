@@ -1,22 +1,46 @@
 name: build
 # Weekly rebuild picks up new Hermes stable, Claude Code and the DirectSDK plugin, so images never go stale.
+# Pull requests build and smoke-test agent-base (including trace-export) without logging in or pushing.
 on:
   push: { branches: [main] }
+  pull_request:
   schedule: [{ cron: '23 7 * * 1' }]
   workflow_dispatch:
 permissions: { contents: read, packages: write }
-concurrency: { group: build, cancel-in-progress: false }
+concurrency: { group: "build-${{ github.ref }}", cancel-in-progress: false }
 jobs:
   base:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: bash -n images/base/lane images/base/agent-setup images/base/trace-export tools/boat-trace-pull
+      - if: github.event_name != 'pull_request'
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - run: |
           docker build -t ghcr.io/kvnloo/agent-base:latest -t ghcr.io/kvnloo/agent-base:${GITHUB_SHA::7} images/base
           docker run --rm --entrypoint bash ghcr.io/kvnloo/agent-base:latest -c 'claude --version && hermes --version | head -1 && gh --version | head -1 && uv --version'
-          docker push -a ghcr.io/kvnloo/agent-base
+      - name: trace-export smoke test (sessions in, credentials out)
+        run: |
+          docker run --rm -e FAKE_API_TOKEN=tok-abcdefghijklmnop0123 --entrypoint bash ghcr.io/kvnloo/agent-base:latest -c '
+            set -euo pipefail
+            H="${HERMES_HOME:-$HOME/.hermes}"; mkdir -p "$H/profiles/p1" ~/.claude/projects/-work ~/.codex/sessions/2026/01/01
+            echo "{\"type\":\"user\",\"message\":\"hi $FAKE_API_TOKEN\"}" > ~/.claude/projects/-work/s1.jsonl
+            echo "{}" > ~/.codex/sessions/2026/01/01/rollout-x.jsonl
+            echo "{}" > ~/.claude/.credentials.json; echo "{}" > ~/.codex/auth.json
+            echo "{}" > ~/.codex/sessions/2026/01/01/auth.json; echo "{}" > ~/.claude/projects/-work/.env.json
+            for d in "$H" "$H/profiles/p1"; do python3 -c "import sqlite3,sys;c=sqlite3.connect(sys.argv[1]);c.execute(\"create table t(x)\");c.commit()" "$d/state.db"; done
+            out=$(TRACE_HOST=ci trace-export /tmp/te); tar -tzf "$out" | tee /tmp/list
+            grep -q "claude/projects/-work/s1.jsonl" /tmp/list
+            grep -q "codex/sessions/2026/01/01/rollout-x.jsonl" /tmp/list
+            grep -q "hermes/default/state.db" /tmp/list && grep -q "hermes/p1/state.db" /tmp/list
+            if grep -Ei "credentials|auth\.json|\.env" /tmp/list; then echo "credential leaked"; exit 1; fi
+            if tar -xzOf "$out" | grep -aq "$FAKE_API_TOKEN"; then echo "token value leaked"; exit 1; fi
+            tar -xzOf "$out" --wildcards "*/manifest.json" | python3 -c "import json,sys;m=json.load(sys.stdin);assert m[\"host\"]==\"ci\" and \"FAKE_API_TOKEN\" in m[\"redacted\"],m"
+            echo trace-export smoke ok'
+      - if: github.event_name != 'pull_request'
+        run: docker push -a ghcr.io/kvnloo/agent-base
   repo:
+    if: github.event_name != 'pull_request'
     needs: base
     runs-on: ubuntu-latest
     strategy:
