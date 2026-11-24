@@ -1,0 +1,186 @@
+#!/bin/bash
+# boat-trace-pull <sandbox-id> [--no-export] [--no-import]
+# Studio side of trace-export: pull a Boat sandbox's agent traces into AgentsView. Run it BEFORE
+# `boat stop` (a stopped sandbox cannot exec). Steps:
+#   1. installs trace-export on the sandbox if it is missing (Boat sandboxes run Boat's own Ubuntu
+#      image, not agent-base, so the script is shipped over `boat exec`), then runs it;
+#   2. copies the tarball home (`boat scp`, falling back to base64 chunks over `boat exec`),
+#      checks sha256, refuses anything over 5 GB;
+#   3. unpacks it into the Studio AgentsView data dir under boat-traces/:
+#        claude-home/projects/boat-<id>--<project>/...   (registered in [agents.claude] homes)
+#        codex-home/sessions/YYYY/MM/DD/rollout-*.jsonl   (registered in [agents.codex] homes)
+#        hermes/<id>-<profile>/{state.db,sessions/}       (registered in [agents.hermes] dirs)
+#        tarballs/<id>/trace-*.tar.gz + manifest.json     (kept as the raw copy)
+#   4. parses the new sessions into the Studio DB and labels them boat=<id> boat_name=<name>.
+# Idempotent: files land at stable paths and AgentsView keys sessions by their native ids, so a
+# re-pull overwrites/extends the same sessions instead of adding copies.
+# Canonical store: groot's AgentsView pulls the Studio's data dir over ssh ([[remote_hosts]] studio,
+# agentsview-remote reads the same config.toml), so sessions imported here reach groot on its next
+# 30-minute agentsview-sync run with no extra step.
+# Env: AGENTSVIEW_DATA_DIR (default ~/.local/state/agentsview), AGENTSVIEW_BIN (default agentsview).
+set -euo pipefail
+sb="${1:?usage: boat-trace-pull <sandbox-id> [--no-export] [--no-import]}"; shift
+do_export=1; do_import=1
+for a in "$@"; do case "$a" in --no-export) do_export=0;; --no-import) do_import=0;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
+here="$(cd "$(dirname "$0")" && pwd)"
+data="${AGENTSVIEW_DATA_DIR:-$HOME/.local/state/agentsview}"
+av="${AGENTSVIEW_BIN:-agentsview}"
+max_bytes=$((5 * 1024 * 1024 * 1024))
+export BOAT_NO_UPDATE=1
+log() { echo "boat-trace-pull: $*" >&2; }
+
+rx() { # rx <timeout> <bash script>  -> stdout of the command; fails on non-zero exit
+  local out; out="$(boat exec "$sb" --json --timeout "$1" -- bash -lc "$2")"
+  if [ "$(jq -r '.exitCode' <<<"$out")" != 0 ]; then
+    jq -r '.stderr' <<<"$out" >&2; return 1
+  fi
+  jq -j '.stdout' <<<"$out"
+}
+
+name="$(boat info "$sb" --json | jq -r '.sandbox.name // empty')"
+id="$(printf '%s' "$sb" | tr -c 'A-Za-z0-9._-' '_')"
+log "sandbox $sb (${name:-unnamed})"
+
+if [ "$do_export" = 1 ]; then
+  if ! rx 30 'command -v trace-export || test -x ~/.local/bin/trace-export' >/dev/null; then
+    log "installing trace-export into ~/.local/bin"
+    b64="$(base64 < "$here/../images/base/trace-export" | tr -d '\n')"
+    rx 60 "mkdir -p ~/.local/bin && echo '$b64' | base64 -d > ~/.local/bin/trace-export && chmod +x ~/.local/bin/trace-export" >/dev/null
+  fi
+  remote="$(rx 600 'PATH=$HOME/.local/bin:$PATH trace-export' | tail -1)"
+else
+  remote="$(rx 30 'readlink -f ~/.trace-exports/trace-latest.tar.gz')"
+fi
+[ -n "$remote" ] || { log "no export found on sandbox"; exit 1; }
+read -r size rsha < <(rx 120 "stat -c %s '$remote' | tr '\n' ' '; sha256sum '$remote' | cut -d' ' -f1")
+log "remote $remote ($size bytes)"
+if [ "$size" -gt "$max_bytes" ]; then log "export is over 5 GB: needs Kevin's approval, not copying"; exit 4; fi
+
+dest="$data/boat-traces/tarballs/$id"; mkdir -p "$dest"
+local_tar="$dest/$(basename "$remote")"
+if ! boat scp "$sb:$remote" "$local_tar" >/dev/null 2>&1; then
+  log "boat scp unavailable here; copying over boat exec"
+  chunk=$((3 * 1024 * 1024)); n=$(( (size + chunk - 1) / chunk )); : > "$local_tar.part"
+  for ((i = 0; i < n; i++)); do
+    rx 300 "dd if='$remote' bs=$chunk skip=$i count=1 status=none | base64 -w0" | base64 -d >> "$local_tar.part"
+  done
+  mv "$local_tar.part" "$local_tar"
+fi
+lsha="$(shasum -a 256 "$local_tar" | cut -d' ' -f1)"
+[ "$lsha" = "$rsha" ] || { log "sha256 mismatch ($lsha != $rsha)"; rm -f "$local_tar"; exit 5; }
+log "copied $local_tar (sha256 ok)"
+
+# Fail closed if anything credential-shaped is inside, before it touches the data dir.
+if tar -tzf "$local_tar" | grep -Ei '(^|/)(\.credentials[^/]*|auth\.json|\.env[^/]*|[^/]*(token|secret)[^/]*|[^/]*\.pem|[^/]*\.key|id_rsa[^/]*|id_ed25519[^/]*)$'; then
+  log "credential-like path in tarball; refusing to import"; exit 3
+fi
+
+stage="$(mktemp -d "${TMPDIR:-/tmp}/boat-trace-pull.XXXXXX")"; trap 'rm -rf "$stage"' EXIT
+tar -xzf "$local_tar" -C "$stage"
+top="$(find "$stage" -mindepth 1 -maxdepth 1 -type d | head -1)"
+cp "$top/manifest.json" "$dest/manifest.json"
+bt="$data/boat-traces"
+mkdir -p "$bt/claude-home/projects" "$bt/codex-home/sessions" "$bt/hermes"
+new_files="$stage/new-files"; : > "$new_files"
+# No -t: files that changed get a fresh mtime, so incremental scanners (groot's ssh pull of this data
+# dir) see them as new; --checksum leaves unchanged files and their mtimes alone on re-pulls.
+sync_opts="-rl --checksum"
+if [ -d "$top/claude/projects" ]; then
+  for p in "$top/claude/projects"/*/; do
+    [ -d "$p" ] || continue
+    t="$bt/claude-home/projects/boat-$id--$(basename "$p")"; mkdir -p "$t"
+    rsync $sync_opts "$p" "$t/"
+    (cd "$p" && find . -maxdepth 1 -name '*.jsonl') | sed "s#^\./#$t/#" >> "$new_files"
+  done
+fi
+for c in sessions archived_sessions; do
+  if [ -d "$top/codex/$c" ]; then
+    mkdir -p "$bt/codex-home/$c"; rsync $sync_opts "$top/codex/$c/" "$bt/codex-home/$c/"
+    (cd "$top/codex/$c" && find . -name '*.jsonl') | sed "s#^\./#$bt/codex-home/$c/#" >> "$new_files"
+  fi
+done
+hermes_dirs=()
+if [ -d "$top/hermes" ]; then
+  for h in "$top/hermes"/*/; do
+    [ -f "$h/state.db" ] || continue
+    t="$bt/hermes/$id-$(basename "$h")"; mkdir -p "$t/sessions"
+    cp "$h/state.db" "$t/state.db"
+    hermes_dirs+=("$t/sessions")
+  done
+fi
+log "unpacked $(wc -l < "$new_files" | tr -d ' ') claude/codex session files, ${#hermes_dirs[@]} hermes db(s)"
+
+# Register the aggregate roots once (idempotent); keeps a timestamped backup of the config.
+py=""
+for c in python3 /opt/homebrew/bin/python3 python3.13 python3.12 python3.11; do
+  if command -v "$c" >/dev/null && "$c" -c 'import tomllib' 2>/dev/null; then py="$c"; break; fi
+done
+[ -n "$py" ] || { log "need python >= 3.11 (tomllib) to edit config.toml"; exit 6; }
+"$py" - "$data/config.toml" "$bt/claude-home" "$bt/codex-home" "${hermes_dirs[@]+"${hermes_dirs[@]}"}" <<'PY'
+import os, re, shutil, sys, time, tomllib
+path, claude_home, codex_home, *hermes = sys.argv[1:]
+text = open(path).read() if os.path.exists(path) else ""
+cfg = tomllib.loads(text) if text else {}
+agents = cfg.get("agents", {})
+want = {("claude", "homes"): [claude_home], ("codex", "homes"): [codex_home], ("hermes", "dirs"): hermes}
+changed = False
+for (agent, key), paths in want.items():
+    if not paths:
+        continue
+    cur = agents.get(agent, {}).get(key)
+    if agent == "hermes" and cur is None:
+        cur = ["~/.hermes/sessions"]  # setting dirs replaces the default; keep it
+    cur = list(cur or [])
+    add = [p for p in paths if p not in cur and p.replace(os.path.expanduser("~"), "~") not in cur]
+    if not add:
+        continue
+    new = cur + add
+    line = f'    {key} = [{", ".join(chr(34) + p + chr(34) for p in new)}]'
+    sect = re.search(rf"(?m)^[ \t]*\[agents\.{agent}\][ \t]*$", text)
+    if sect:
+        start = sect.end()
+        nxt = re.search(r"(?m)^[ \t]*\[", text[start:])
+        end = start + (nxt.start() if nxt else len(text) - start)
+        body = text[start:end]
+        if re.search(rf"(?m)^[ \t]*{key}[ \t]*=", body):
+            body = re.sub(rf"(?m)^[ \t]*{key}[ \t]*=.*$", line, body, count=1)
+        else:
+            body = "\n" + line + body
+        text = text[:start] + body + text[end:]
+    else:
+        if not re.search(r"(?m)^[ \t]*\[agents\][ \t]*$", text):
+            text += "\n[agents]\n"
+        text += f"  [agents.{agent}]\n{line}\n"
+    changed = True
+if changed:
+    tomllib.loads(text)  # refuse to write invalid TOML
+    if os.path.exists(path):
+        shutil.copy2(path, f"{path}.bak-boat-trace-{time.strftime('%Y%m%dT%H%M%S')}")
+    open(path, "w").write(text)
+    print("config.toml: registered boat-traces roots", file=sys.stderr)
+PY
+
+[ "$do_import" = 1 ] || { log "skipping import (--no-import)"; exit 0; }
+export AGENTSVIEW_DATA_DIR="$data"
+# Writes go through the AgentsView daemon for this data dir. If none is running we start one for the
+# import and stop it again afterwards, so the Studio is left as we found it (groot's ssh pull
+# expects no long-lived Studio daemon).
+started=0
+if ! "$av" serve status 2>/dev/null | grep -q 'running at'; then started=1; fi
+cleanup_daemon() { [ "$started" = 1 ] && "$av" serve stop >/dev/null 2>&1 || true; rm -rf "$stage"; }
+trap cleanup_daemon EXIT
+log "agentsview sync (data dir $data)"
+"$av" sync >&2 || log "agentsview sync reported an error (continuing with per-file sync)"
+ids=()
+while IFS= read -r f; do
+  [ -n "$f" ] || continue
+  # session sync re-parses one file and answers with its session; ids are native (claude uuid,
+  # codex rollout uuid), so this is an upsert, never a duplicate.
+  sid="$("$av" session sync "$f" --json 2>/dev/null | jq -r '.id // .session_id // .session.id // empty' || true)"
+  [ -n "$sid" ] && ids+=("$sid")
+done < "$new_files"
+for sid in "${ids[@]+"${ids[@]}"}"; do
+  "$av" session label "$sid" "boat=$sb" ${name:+"boat_name=$name"} >/dev/null 2>&1 || true
+done
+log "imported ${#ids[@]} claude/codex session(s) (+${#hermes_dirs[@]} hermes db) into $data/sessions.db"
+printf '%s\n' "${ids[@]+"${ids[@]}"}"

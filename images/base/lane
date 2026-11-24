@@ -2,11 +2,23 @@
 # lane <prompt-file> [resume-session-id]
 # Runs one Hermes (DirectSDK) agent turn non-interactively and keeps the session id for resumes.
 # No --source flag: the DirectSDK provider answers invalid_params for a custom session source.
+# On exit (success or failure) it runs trace-export so the session traces can be pulled into
+# AgentsView (tools/boat-trace-pull). LANE_TRACE_EXPORT=0 skips that; a failed export never
+# changes the lane's exit code.
 set -euo pipefail
 agent-setup
 p="$1"; sid="${2:-}"
 cd "${LANE_WORKDIR:-/work}"
+export_traces() {
+  rc=$?
+  if [ "${LANE_TRACE_EXPORT:-1}" != 0 ]; then
+    trace-export >&2 || echo "lane: trace-export failed (ignored)" >&2
+  fi
+  exit "$rc"
+}
+trap export_traces EXIT
 if [ -n "$sid" ]; then
-  exec hermes chat --oneshot --yolo -Q --resume "$sid" --query-file "$p"
+  hermes chat --oneshot --yolo -Q --resume "$sid" --query-file "$p"
+else
+  hermes chat --oneshot --yolo -Q --pass-session-id --query-file "$p"
 fi
-exec hermes chat --oneshot --yolo -Q --pass-session-id --query-file "$p"

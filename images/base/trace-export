@@ -1,0 +1,100 @@
+#!/bin/bash
+# trace-export [OUT_DIR]
+# Bundles this machine's agent session traces into one tarball for AgentsView:
+#   claude/projects/**.jsonl     <- ${CLAUDE_CONFIG_DIR:-~/.claude}/projects
+#   codex/sessions/**.jsonl      <- ${CODEX_HOME:-~/.codex}/sessions (+ archived_sessions)
+#   hermes/<profile>/state.db    <- ${HERMES_HOME:-~/.hermes}/state.db and profiles/*/state.db
+#                                   (copied with the SQLite online-backup API, safe while hermes runs)
+#   manifest.json                <- host label, source paths, file count, sha256 of every file
+# Only those trees are copied, and credential-like names (.credentials*, auth.json, .env*, *token*,
+# *secret*, *.pem, *.key, id_rsa*) are deleted from the staging copy, then checked again before packing.
+# Writes $OUT_DIR/trace-<host>-<utc>.tar.gz (default ~/.trace-exports), links trace-latest.tar.gz
+# to it, and prints the path. Host label: TRACE_HOST, else BOAT_ID/BOX_ID (Boat sandbox id), else hostname.
+# `lane` runs this on exit; run it by hand any time. tools/boat-trace-pull on the Studio fetches it.
+set -euo pipefail
+umask 077
+out="${1:-${TRACE_EXPORT_DIR:-$HOME/.trace-exports}}"
+host="${TRACE_HOST:-${BOAT_ID:-${BOX_ID:-$(hostname)}}}"
+host="$(printf '%s' "$host" | tr -c 'A-Za-z0-9._-' '_')"
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+stage="$(mktemp -d "${TMPDIR:-/tmp}/trace-export.XXXXXX")"
+trap 'rm -rf "$stage"' EXIT
+root="$stage/trace-$host-$ts"
+mkdir -p "$root" "$out"
+
+copy_tree() { # copy_tree SRC DEST  (session files only)
+  local src="$1" dst="$2"
+  [ -d "$src" ] || return 0
+  mkdir -p "$dst"
+  (cd "$src" && find . -type f \( -name '*.jsonl' -o -name '*.json' \) -print0 \
+    | tar --null -T - -cf - 2>/dev/null) | (cd "$dst" && tar -xf -)
+}
+
+claude_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+codex_home="${CODEX_HOME:-$HOME/.codex}"
+hermes_home="${HERMES_HOME:-$HOME/.hermes}"
+copy_tree "$claude_home/projects" "$root/claude/projects"
+copy_tree "$codex_home/sessions" "$root/codex/sessions"
+copy_tree "$codex_home/archived_sessions" "$root/codex/archived_sessions"
+
+backup_db() { # backup_db SRC DEST
+  mkdir -p "$(dirname "$2")"
+  if command -v python3 >/dev/null; then
+    python3 - "$1" "$2" <<'PY'
+import sqlite3, sys
+src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=30)
+dst = sqlite3.connect(sys.argv[2])
+src.backup(dst); dst.close(); src.close()
+PY
+  else
+    sqlite3 "file:$1?mode=ro" ".timeout 30000" ".backup '$2'"
+  fi
+}
+[ -f "$hermes_home/state.db" ] && backup_db "$hermes_home/state.db" "$root/hermes/default/state.db"
+for db in "$hermes_home"/profiles/*/state.db; do
+  [ -f "$db" ] || continue
+  p="$(basename "$(dirname "$db")")"
+  backup_db "$db" "$root/hermes/$p/state.db"
+done
+
+# Scrub, then fail closed if anything credential-shaped is still staged.
+cred=( '(' -iname '.credentials*' -o -iname 'auth.json' -o -iname '.env*' -o -iname '*token*'
+        -o -iname '*secret*' -o -iname '*.pem' -o -iname '*.key' -o -iname 'id_rsa*' -o -iname 'id_ed25519*' ')' )
+find "$root" -type f "${cred[@]}" -delete
+if [ -n "$(find "$root" -type f "${cred[@]}" -print -quit)" ]; then
+  echo "trace-export: credential-like file survived scrub; refusing to pack" >&2; exit 3
+fi
+
+# Second line of defence: any secret-named env value (>=12 chars) found inside a staged file is
+# overwritten in place with same-length 'X's (keeps JSONL and SQLite pages valid). Only variable
+# names and counts reach the manifest.
+python3 - "$root" "$host" "$ts" "$claude_home" "$codex_home" "$hermes_home" <<'PY'
+import hashlib, json, os, re, sys
+root, host, ts, claude, codex, hermes = sys.argv[1:]
+secret = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|CREDENTIAL|AUTH", re.I)
+vals = {k: v.encode() for k, v in os.environ.items() if secret.search(k) and len(v) >= 12}
+redacted, files = {}, {}
+for d, _, names in os.walk(root):
+    for n in names:
+        p = os.path.join(d, n)
+        data = open(p, "rb").read()
+        new = data
+        for k, v in vals.items():
+            if v in new:
+                redacted[k] = redacted.get(k, 0) + new.count(v)
+                new = new.replace(v, b"X" * len(v))
+        if new is not data:
+            open(p, "wb").write(new)
+        files[os.path.relpath(p, root)] = hashlib.sha256(new).hexdigest()
+json.dump({"format": "agent-images/trace-export/v1", "host": host, "created_utc": ts,
+           "boat_id": os.environ.get("BOAT_ID") or os.environ.get("BOX_ID"),
+           "sources": {"claude": claude, "codex": codex, "hermes": hermes},
+           "redacted": sorted(redacted), "redacted_counts": redacted,
+           "file_count": len(files), "files": dict(sorted(files.items()))},
+          open(os.path.join(root, "manifest.json"), "w"), indent=1)
+PY
+
+tarball="$out/trace-$host-$ts.tar.gz"
+tar -C "$stage" -czf "$tarball.part" "trace-$host-$ts" && mv "$tarball.part" "$tarball"
+ln -sfn "$(basename "$tarball")" "$out/trace-latest.tar.gz"
+echo "$tarball"

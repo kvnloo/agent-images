@@ -18,6 +18,6 @@ RUN git clone -q --depth 1 --filter=blob:none --sparse https://github.com/NousRe
     && rm -rf /tmp/hop
 # Unattended "boat" profile (SOUL.md + config.yaml); agent-setup installs it on first agent run.
 COPY profiles /opt/profiles
-COPY agent-setup lane /usr/local/bin/
-RUN chmod +x /usr/local/bin/agent-setup /usr/local/bin/lane
+COPY agent-setup lane trace-export /usr/local/bin/
+RUN chmod +x /usr/local/bin/agent-setup /usr/local/bin/lane /usr/local/bin/trace-export
 LABEL org.opencontainers.image.source=https://github.com/kvnloo/agent-images
