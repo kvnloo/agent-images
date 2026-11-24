@@ -1,6 +1,6 @@
 name: build
 # Weekly rebuild picks up new Hermes stable, Claude Code and the DirectSDK plugin, so images never go stale.
-# Pull requests build and smoke-test agent-base (including trace-export) without logging in or pushing.
+# Pull requests build and smoke-test agent-base (trace-export and the boat profile) without logging in or pushing.
 on:
   push: { branches: [main] }
   pull_request:
@@ -37,6 +37,22 @@ jobs:
             if tar -xzOf "$out" | grep -aq "$FAKE_API_TOKEN"; then echo "token value leaked"; exit 1; fi
             tar -xzOf "$out" --wildcards "*/manifest.json" | python3 -c "import json,sys;m=json.load(sys.stdin);assert m[\"host\"]==\"ci\" and \"FAKE_API_TOKEN\" in m[\"redacted\"],m"
             echo trace-export smoke ok'
+      - name: boat profile installs and is unattended
+        run: |
+          docker run --rm --entrypoint bash -e HERMES_HOME=/tmp/h ghcr.io/kvnloo/agent-base:latest -c '
+            set -e; agent-setup
+            test "$(cat /tmp/h/.agent-setup-done)" = boat
+            head -1 /tmp/h/SOUL.md | grep -qx "# Boat Hermes"
+            test "$(stat -c %U /tmp/h/config.yaml)" = hermes
+            test "$(HOME=/opt/data git config --global user.name)" = "Kevin Rajan"
+            for kv in approvals.mode=off approvals.single_query_mode=approve approvals.cron_mode=approve approvals.unattended_mode=approve; do
+              got=$(hermes config get ${kv%%=*} | tail -1); echo "${kv%%=*}=$got"; test "$got" = "${kv#*=}"
+            done'
+          docker run --rm --entrypoint bash -e HERMES_HOME=/tmp/h -e AGENT_PROFILE=none ghcr.io/kvnloo/agent-base:latest -c '
+            set -e; agent-setup; test "$(cat /tmp/h/.agent-setup-done)" = none
+            if head -1 /tmp/h/SOUL.md 2>/dev/null | grep -qx "# Boat Hermes"; then echo "boat persona leaked"; exit 1; fi
+            test "$(hermes config get approvals.mode | tail -1)" != off
+            echo "AGENT_PROFILE=none keeps upstream defaults"'
       - if: github.event_name != 'pull_request'
         run: docker push -a ghcr.io/kvnloo/agent-base
   repo:

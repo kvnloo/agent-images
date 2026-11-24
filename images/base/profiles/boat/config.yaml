@@ -1,0 +1,122 @@
+# Boat profile: unattended ("yolo") Hermes for disposable sandboxes.
+# Derived from github.com/teknium1/hermes-starter-profile (MIT), widened to a working toolset.
+# agent-setup copies this into $HERMES_HOME when AGENT_PROFILE=boat (the default), then sets
+# model.provider / model.default / agent.max_turns from the environment.
+# Public file: no hosts, accounts, keys or personal paths belong here.
+
+agent:
+  max_turns: 400
+  verify_on_stop: false
+  disabled_toolsets:
+    - bfl
+    - computer_use
+    - context_engine
+    - desktop_ui
+    - discord
+    - discord_admin
+    - feishu_doc
+    - feishu_drive
+    - homeassistant
+    - kanban
+    - cronjob
+    - project
+    - spotify
+    - video
+    - video_gen
+    - x_search
+    - yuanbao
+
+# No clarify: nobody is there to answer, so a question would only stall the run.
+platform_toolsets:
+  cli: [code_execution, delegation, file, memory, search, session_search, skills, terminal, todo, vision]
+  api_server: [code_execution, delegation, file, memory, search, session_search, skills, terminal, todo, vision]
+  webhook: [code_execution, delegation, file, memory, search, session_search, skills, terminal, todo, vision]
+  cron: [code_execution, file, search, skills, terminal, todo, vision]
+
+# Never prompt. mode=off is the same bypass as --yolo; the *_mode keys cover -q / cron /
+# webhook+api_server sessions, which otherwise default to deny. Hardline floors and the deny
+# globs below still block, even under yolo.
+approvals:
+  mode: "off"
+  single_query_mode: approve
+  cron_mode: approve
+  unattended_mode: approve
+  timeout: 30
+  deny:
+    - "*git push --force*"
+    - "*git push -f *"
+    - "*git push -f"
+    - "*git push * --force*"
+    - "*git push*--mirror*"
+    - "*git push*--delete*"
+    - "*git push * :*"
+    - "*git push origin main*"
+    - "*git push origin master*"
+    - "*git push*HEAD:main*"
+    - "*git push*HEAD:master*"
+    - "*gh repo delete*"
+    - "*gh repo edit*--visibility*"
+    - "*gh release delete*"
+    - "*rm -rf /"
+    - "*rm -rf / *"
+    - "*rm -rf /[*]*"
+    - "*rm -rf ~"
+    - "*rm -rf ~/"
+    - "*rm -rf ~/ *"
+    - "*rm -rf $HOME"
+    - "*rm -rf $HOME/"
+
+web:
+  search_backend: ""
+  extract_backend: ""
+
+browser:
+  allow_private_urls: false
+  record_sessions: false
+
+privacy:
+  redact_pii: true
+
+# Writes go straight through: staged writes would wait for a reviewer who never comes.
+memory:
+  memory_enabled: true
+  user_profile_enabled: false
+  nudge_interval: 0
+  write_approval: false
+
+skills:
+  external_dirs: []
+  creation_nudge_interval: 0
+  write_approval: false
+
+curator:
+  enabled: false
+
+delegation:
+  inherit_mcp_toolsets: false
+  orchestrator_enabled: false
+  max_spawn_depth: 1
+  subagent_auto_approve: true
+
+checkpoints:
+  enabled: false
+
+smart_model_routing:
+  enabled: false
+
+security:
+  allow_private_urls: false
+  redact_secrets: true
+  protected_instruction_files: true
+  tirith_enabled: true
+  tirith_fail_open: false
+  allow_lazy_installs: true
+  website_blocklist:
+    enabled: false
+    domains: []
+    shared_files: []
+
+hooks: {}
+hooks_auto_accept: false
+quick_commands: {}
+mcp_servers: {}
